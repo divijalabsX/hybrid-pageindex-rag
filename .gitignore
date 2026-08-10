@@ -1,3 +1,23 @@
+#Environment
+.venv/
+
+#Environment variables
+.env
+
+# Uploaded PDFs
+data/uploads/*
+
+# Keep upload directory in Git
+!data/uploads/.gitkeep
+
+# Generated project data
+data/pageindex/*
+data/okf/*
+
+# Keep generated-data directories in Git
+!data/pageindex/.gitkeep
+!data/okf/.gitkeep
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
