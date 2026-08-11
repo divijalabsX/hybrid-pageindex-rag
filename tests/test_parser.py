@@ -12,4 +12,5 @@ if pages:
     print("\nFirst page:")
     print(f"Page number: {pages[0].page_number}")
     print(f"Word count: {pages[0].word_count}")
+    print(f"Character count: {pages[0].char_count}")
     print(f"Text preview:\n{pages[0].text[:500]}")
