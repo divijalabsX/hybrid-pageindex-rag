@@ -14,19 +14,7 @@ The indexed document can then be used to retrieve relevant sections before gener
 
 ### Current Pipeline
 
-PDF /br
-↓ /br
-PDF Parsing /br
-↓ /br
-Document Structure / PageIndex /br
-↓ /br
-Hierarchical Index /br
-↓ /br
-Relevant Section Retrieval /br
-↓ /br
-LLM /br
-↓ /br
-Answer / Structured Output /br
+PDF → PDF Parsing → Document Structure / PageIndex → Hierarchical Index → Relevant Section Retrieval → LLM → Answer / Structured Output
 
 ## Key Features
 
