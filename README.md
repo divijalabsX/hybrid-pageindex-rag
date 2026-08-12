@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <div align="center">
   
 <a href="https://vectify.ai/pageindex" target="_blank">
@@ -312,3 +313,6 @@ PageIndex Blog, Sep 2025.
 ---
 
 © 2026 [Vectify AI](https://vectify.ai)
+=======
+# hybrid-pageindex-rag
+>>>>>>> origin/main
