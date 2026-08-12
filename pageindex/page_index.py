@@ -579,11 +579,14 @@ def add_page_number_to_toc(part, structure, model=None):
     )
     
     current_json_raw = llm_completion(model=model, prompt=prompt)
+
     json_result = extract_json(current_json_raw)
-    
+
+
     for item in json_result:
         if 'start' in item:
             del item['start']
+
     return json_result
 
 

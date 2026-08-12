@@ -76,10 +76,12 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
             else:
                 import litellm
                 response = litellm.completion(
-                    model=model,
-                    messages=messages,
-                    temperature=0,
-                    drop_params=True,
+                model=model,
+                messages=messages,
+                temperature=0,
+                api_base="http://localhost:11434",
+                extra_body={"think": False},
+                drop_params=True,
                 )
             content = response.choices[0].message.content
             if return_finish_reason:
@@ -122,10 +124,12 @@ async def llm_acompletion(model, prompt):
             else:
                 import litellm
                 response = await litellm.acompletion(
-                    model=model,
-                    messages=messages,
-                    temperature=0,
-                    drop_params=True,
+                model=model,
+                messages=messages,
+                temperature=0,
+                api_base="http://localhost:11434",
+                extra_body={"think": False},
+                drop_params=True,
                 )
             return response.choices[0].message.content
         except Exception as e:
