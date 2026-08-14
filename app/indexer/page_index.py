@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field
+from typer import prompt
 from app.models.page import Page
 
 
@@ -169,3 +170,142 @@ DOCUMENT:
     )
 
     return root
+
+def create_ollama_page_index(pages: list[Page]) -> PageIndexNode:
+    """
+    Use the local Ollama/Qwen model to identify
+    the hierarchical structure of the document.
+    """
+
+    page_contents = []
+
+    for page in pages:
+        page_contents.append(
+            f"""
+PAGE {page.page_number}
+--------------------
+{page.text}
+"""
+        )
+
+    document_text = "\n".join(page_contents)
+
+    prompt = f"""
+You are a document structure analyzer.
+
+Analyze the following research paper and identify its hierarchical structure.
+
+IMPORTANT:
+- Use ONLY information present in the document.
+- Do not invent section names.
+- Identify the actual sections and subsections.
+- Each section must have a start page and end page.
+- Page numbers are 1-based.
+- Keep the hierarchy meaningful.
+- Do not create a node for every paragraph.
+- Return ONLY valid JSON.
+- Do not include markdown or explanations outside the JSON.
+
+Return exactly this structure:
+
+{{
+  "title": "Document title",
+  "sections": [
+    {{
+      "title": "Section title",
+      "start_index": 1,
+      "end_index": 3,
+      "summary": "Short summary of this section.",
+      "sections": [
+        {{
+          "title": "Subsection title",
+          "start_index": 1,
+          "end_index": 2,
+          "summary": "Short summary of this subsection.",
+          "sections": []
+        }}
+      ]
+    }}
+  ]
+}}
+
+DOCUMENT:
+
+{document_text}
+"""
+
+    response = generate_ollama_text(prompt, json_mode=True)
+
+    # Remove markdown code fences if Qwen adds them.
+
+    response = generate_ollama_text(prompt, json_mode=True)
+
+    # Remove markdown code fences if Qwen adds them.
+    response = response.strip()
+
+    if response.startswith("```"):
+        response = response.replace("```json", "", 1)
+        response = response.replace("```", "", 1)
+        response = response.strip()
+
+    try:
+        data = json.loads(response)
+    except json.JSONDecodeError as e:
+        print("\n========== RAW QWEN RESPONSE ==========")
+        print(response)
+        print("========== END RAW RESPONSE ==========")
+        print(f"\nJSON ERROR: {e}")
+        raise
+
+    root = PageIndexNode(
+        node_id="0001",
+        title=data["title"],
+        start_index=1,
+        end_index=len(pages),
+        summary="Root node representing the complete document."
+    )
+
+    def build_nodes(
+        sections: list,
+        parent_id: str
+    ) -> list[PageIndexNode]:
+
+        nodes = []
+
+        for index, section in enumerate(sections, start=1):
+
+            node_id = f"{parent_id}.{index}"
+
+            node = PageIndexNode(
+                node_id=node_id,
+                title=section["title"],
+                start_index=section["start_index"],
+                end_index=section["end_index"],
+                summary=section.get("summary", "")
+            )
+
+            child_sections = section.get("sections", [])
+
+            node.nodes = build_nodes(
+                child_sections,
+                node_id
+            )
+
+            nodes.append(node)
+
+        return nodes
+
+    root.nodes = build_nodes(
+        data.get("sections", []),
+        "0001"
+    )
+
+    return root
+    root.nodes = build_nodes(
+        data.get("sections", []),
+        "0001"
+    )
+
+    return root
+
+from app.llm.ollama_client import generate_text as generate_ollama_text
