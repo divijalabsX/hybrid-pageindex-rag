@@ -1,38 +1,63 @@
 from fastapi import APIRouter, UploadFile, File
 import os
+
 from app.parser.pdf_parser import parse_pdf
+from app.parser.document_parser import parse_document
 from app.llm.gemini_client import generate_text
 from app.indexer.page_index import create_llm_page_index, save_page_index
 
 router = APIRouter()
 
-# Global variable — upload hui pages temporarily yahan store honge
-# (production mein isse better session/db management chahiye hoga, abhi ke liye simple)
+# Global variable — uploaded PDF pages temporarily stored here.
 current_pages = []
 
 
 @router.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...)):
     global current_pages
+
     try:
         os.makedirs("data/uploads", exist_ok=True)
+        os.makedirs("data/markdown", exist_ok=True)
+
         file_path = f"data/uploads/{file.filename}"
 
         contents = await file.read()
+
         with open(file_path, "wb") as f:
             f.write(contents)
 
-        pages = parse_pdf(file_path)
-        current_pages = pages
-        total_words = sum(p.word_count for p in pages)
+        # Convert the uploaded document into standard Markdown using AnyDoc.
+        markdown = parse_document(file_path)
+
+        markdown_filename = f"{file.filename}.md"
+        markdown_path = f"data/markdown/{markdown_filename}"
+
+        with open(markdown_path, "w", encoding="utf-8") as f:
+            f.write(markdown)
+
+        # Parse PDF pages for the existing PageIndex/RAG pipeline.
+        if file.filename.lower().endswith(".pdf"):
+            pages = parse_pdf(file_path)
+            current_pages = pages
+            total_pages = len(pages)
+            total_words = sum(p.word_count for p in pages)
+        else:
+            total_pages = None
+            total_words = None
 
         return {
             "filename": file.filename,
-            "total_pages": len(pages),
-            "total_words": total_words
+            "status": "converted",
+            "markdown_file": markdown_filename,
+            "characters": len(markdown),
+            "total_pages": total_pages,
+            "total_words": total_words,
         }
+
     except FileNotFoundError as e:
         return {"error": str(e)}
+
     except ValueError as e:
         return {"error": str(e)}
 
@@ -40,6 +65,7 @@ async def upload_pdf(file: UploadFile = File(...)):
 @router.post("/build-index")
 async def build_index():
     global current_pages
+
     if not current_pages:
         return {"error": "No document uploaded yet. Please upload a PDF first."}
 
@@ -50,9 +76,13 @@ async def build_index():
         def count_nodes(node):
             return 1 + sum(count_nodes(child) for child in node.nodes)
 
-        total_sections = count_nodes(page_index) - 1  # root exclude
+        total_sections = count_nodes(page_index) - 1
 
-        return {"status": "index built", "sections": total_sections}
+        return {
+            "status": "index built",
+            "sections": total_sections
+        }
+
     except Exception as e:
         return {"error": f"Failed to build index: {str(e)}"}
 
@@ -67,7 +97,9 @@ async def ask_question(question: str):
     global current_pages
 
     if not current_pages:
-        return {"answer": "Please upload a document first before asking questions."}
+        return {
+            "answer": "Please upload a document first before asking questions."
+        }
 
     try:
         document_text = "\n\n".join(
@@ -84,6 +116,8 @@ QUESTION: {question}
 Answer based only on the document content above."""
 
         answer = generate_text(prompt)
+
         return {"answer": answer}
+
     except Exception as e:
         return {"error": f"Failed to generate answer: {str(e)}"}
