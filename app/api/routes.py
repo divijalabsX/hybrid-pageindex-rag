@@ -3,6 +3,7 @@ import os
 import json
 from app.parser.pdf_parser import parse_pdf
 from app.parser.document_parser import parse_document
+from app.parser.markdown_page_parser import parse_markdown_pages
 from app.llm.gemini_client import generate_text
 from app.indexer.page_index import create_llm_page_index, save_page_index
 from app.okf.okf_generator import load_page_index, node_to_okf, write_okf_item
@@ -39,15 +40,21 @@ async def upload_document(file: UploadFile = File(...)):
 
         current_filename = file.filename
 
-        # Parse PDF pages for the existing PageIndex/RAG pipeline.
+        # Convert the document into Page objects for the existing
+        # PageIndex/RAG pipeline.
         if file.filename.lower().endswith(".pdf"):
+            # Keep the existing PDF parser unchanged.
             pages = parse_pdf(file_path)
-            current_pages = pages
-            total_pages = len(pages)
-            total_words = sum(p.word_count for p in pages)
         else:
-            total_pages = None
-            total_words = None
+            # AnyDoc converts DOCX, XLSX, PPTX, etc. to Markdown.
+            # Then convert that Markdown into the Page model expected
+            # by the existing PageIndex pipeline.
+            pages = parse_markdown_pages(markdown)
+
+        current_pages = pages
+
+        total_pages = len(pages)
+        total_words = sum(p.word_count for p in pages)
 
         return {
             "filename": file.filename,
@@ -70,7 +77,7 @@ async def build_index():
     global current_pages
 
     if not current_pages:
-        return {"error": "No document uploaded yet. Please upload a PDF first."}
+        return {"error": "No document uploaded yet. Please upload a document first."}
 
     try:
         page_index = create_llm_page_index(current_pages)
@@ -105,20 +112,34 @@ async def generate_okf():
         okf_root = node_to_okf(page_index, source)
 
         output_dir = "data/okf"
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Clear old OKF files before generating files
+        # for the newly uploaded document.
+        for filename in os.listdir(output_dir):
+            file_path = os.path.join(output_dir, filename)
+
+            if os.path.isfile(file_path) and filename.endswith(".md"):
+                os.remove(file_path)
+
         files_written = []
 
         def write_recursive(item, is_root=False):
             path = write_okf_item(item, output_dir, is_root=is_root)
             files_written.append(path)
+
             for child in item.children:
                 write_recursive(child, is_root=False)
 
         write_recursive(okf_root, is_root=True)
 
-        return {"status": "okf generated", "files": len(files_written)}
+        return {
+            "status": "okf generated",
+            "files": len(files_written)
+        }
+
     except Exception as e:
         return {"error": f"Failed to generate OKF: {str(e)}"}
-
 
 @router.get("/page-index")
 async def get_page_index():
