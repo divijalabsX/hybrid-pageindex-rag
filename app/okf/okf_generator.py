@@ -12,12 +12,12 @@ def load_page_index(file_path: str) -> dict:
 
 def slugify(title: str) -> str:
     """Convert a title into a safe filename."""
-    return (
-        title.lower()
-        .replace(" ", "-")
-        .replace("/", "-")
-        .replace(":", "")
-    )
+    result = title.lower().replace(" ", "-")
+    # Windows filesystem mein ye characters allowed nahi hain
+    for char in ["?", "*", '"', "<", ">", "|", "\\"]:
+        result = result.replace(char, "")
+    result = result.replace("/", "-").replace(":", "")
+    return result
 
 
 def node_to_okf(node: dict, source: str) -> OKFKnowledgeItem:
