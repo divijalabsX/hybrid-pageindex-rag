@@ -307,7 +307,7 @@ def render_home():
 
     uploaded_file = st.file_uploader(
         "Choose a document",
-        type=["pdf", "doc", "docx", "odt", "ppt", "pptx", "rtf", "epub", "xlsx", "ods", "odp", "csv"],
+        type=["pdf", "doc", "docx", "odt", "ppt", "pptx", "rtf", "epub", "xls", "xlsx", "ods", "odp", "csv"],
         label_visibility="collapsed"
     )
 
