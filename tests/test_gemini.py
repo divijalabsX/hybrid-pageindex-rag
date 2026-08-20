@@ -1,25 +1,37 @@
-from app.llm.gemini_client import generate_page_index_structure
+import os
+
+import pytest
+from dotenv import load_dotenv
 
 
-prompt = """
-Create a simple document hierarchy for a research paper.
+load_dotenv()
 
-Return JSON with this structure:
 
-{
-  "title": "string",
-  "sections": [
+@pytest.mark.skipif(
+    not os.getenv("GEMINI_API_KEY"),
+    reason="Gemini API key not available",
+)
+def test_gemini_page_index_structure():
+    from app.llm.gemini_client import generate_page_index_structure
+
+    prompt = """
+    Create a simple document hierarchy for a research paper.
+
+    Return JSON with this structure:
+
     {
       "title": "string",
-      "summary": "string"
+      "sections": [
+        {
+          "title": "string",
+          "summary": "string"
+        }
+      ]
     }
-  ]
-}
 
-Do not include markdown or explanations.
-"""
+    Do not include markdown or explanations.
+    """
 
-response = generate_page_index_structure(prompt)
+    response = generate_page_index_structure(prompt)
 
-print("Gemini JSON response:")
-print(response)
+    assert response
