@@ -3,7 +3,7 @@ import os
 import json
 from app.parser.pdf_parser import parse_pdf
 from app.parser.document_parser import parse_document
-from app.parser.markdown_page_parser import parse_markdown_pages
+from app.parser.markdown_chunker import chunk_markdown_to_pages
 from app.llm.gemini_client import generate_text
 from app.indexer.page_index import create_llm_page_index, save_page_index
 from app.okf.okf_generator import load_page_index, node_to_okf, write_okf_item
@@ -13,11 +13,12 @@ router = APIRouter()
 # Global variable — uploaded PDF pages temporarily stored here.
 current_pages = []
 current_filename = None
+current_markdown = None
 
 
 @router.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
-    global current_pages, current_filename
+    global current_pages, current_filename, current_markdown
     try:
         os.makedirs("data/uploads", exist_ok=True)
         os.makedirs("data/markdown", exist_ok=True)
@@ -39,22 +40,23 @@ async def upload_document(file: UploadFile = File(...)):
             f.write(markdown)
 
         current_filename = file.filename
+        current_markdown = markdown
 
-        # Convert the document into Page objects for the existing
-        # PageIndex/RAG pipeline.
+        # Parse PDF pages for the existing PageIndex/RAG pipeline.
         if file.filename.lower().endswith(".pdf"):
-            # Keep the existing PDF parser unchanged.
             pages = parse_pdf(file_path)
+            current_pages = pages
+            total_pages = len(pages)
+            total_words = sum(p.word_count for p in pages)
         else:
-            # AnyDoc converts DOCX, XLSX, PPTX, etc. to Markdown.
-            # Then convert that Markdown into the Page model expected
-            # by the existing PageIndex pipeline.
-            pages = parse_markdown_pages(markdown)
-
-        current_pages = pages
-
-        total_pages = len(pages)
-        total_words = sum(p.word_count for p in pages)
+            # Non-PDF upload: chunk the converted Markdown into artificial
+            # "pages" so the same PageIndex/RAG pipeline used for PDFs
+            # (which only needs page_number/text/word_count) also works
+            # here. This replaces any stale pages from a previous document.
+            pages = chunk_markdown_to_pages(markdown)
+            current_pages = pages
+            total_pages = len(pages)
+            total_words = sum(p.word_count for p in pages)
 
         return {
             "filename": file.filename,
@@ -77,7 +79,7 @@ async def build_index():
     global current_pages
 
     if not current_pages:
-        return {"error": "No document uploaded yet. Please upload a document first."}
+        return {"error": "No document uploaded yet. Please upload a PDF first."}
 
     try:
         page_index = create_llm_page_index(current_pages)
@@ -112,34 +114,20 @@ async def generate_okf():
         okf_root = node_to_okf(page_index, source)
 
         output_dir = "data/okf"
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Clear old OKF files before generating files
-        # for the newly uploaded document.
-        for filename in os.listdir(output_dir):
-            file_path = os.path.join(output_dir, filename)
-
-            if os.path.isfile(file_path) and filename.endswith(".md"):
-                os.remove(file_path)
-
         files_written = []
 
         def write_recursive(item, is_root=False):
             path = write_okf_item(item, output_dir, is_root=is_root)
             files_written.append(path)
-
             for child in item.children:
                 write_recursive(child, is_root=False)
 
         write_recursive(okf_root, is_root=True)
 
-        return {
-            "status": "okf generated",
-            "files": len(files_written)
-        }
-
+        return {"status": "okf generated", "files": len(files_written)}
     except Exception as e:
         return {"error": f"Failed to generate OKF: {str(e)}"}
+
 
 @router.get("/page-index")
 async def get_page_index():
@@ -177,17 +165,20 @@ async def get_okf_files():
 
 @router.post("/ask")
 async def ask_question(question: str):
-    global current_pages
+    global current_pages, current_markdown
 
-    if not current_pages:
+    if not current_pages and not current_markdown:
         return {
             "answer": "Please upload a document first before asking questions."
         }
 
     try:
-        document_text = "\n\n".join(
-            [f"Page {p.page_number}: {p.text}" for p in current_pages]
-        )
+        if current_pages:
+            document_text = "\n\n".join(
+                [f"Page {p.page_number}: {p.text}" for p in current_pages]
+            )
+        else:
+            document_text = current_markdown
 
         prompt = f"""Answer the question based on the following document content.
 
