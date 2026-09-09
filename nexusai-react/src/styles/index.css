@@ -1,0 +1,162 @@
+:root {
+  /* --- NexusAI v2 palette, per design brief --- */
+  --color-bg: #F8FBFF;
+  --color-surface: #ffffff;
+  --color-border: #E2E8F0;
+  --color-text: #172033;
+  --color-text-muted: #64748B;
+
+  --color-primary: #3B82F6;
+  --color-primary-dark: #2563EB;
+  --color-primary-light: #EAF3FF;
+
+  --color-success: #16a34a;
+  --color-success-light: #ecfdf3;
+  --color-warning: #d97706;
+  --color-warning-light: #fffbeb;
+  --color-danger: #dc2626;
+  --color-danger-light: #fef2f2;
+
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+
+  --shadow-sm: 0 1px 2px rgba(23, 32, 51, 0.05);
+  --shadow-md: 0 12px 32px rgba(23, 32, 51, 0.08);
+
+  --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: inherit; text-decoration: none; }
+button { font-family: inherit; cursor: pointer; }
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.main-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.page {
+  padding: 40px 48px 80px;
+  max-width: 1080px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: 24px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 12px 22px;
+  font-size: 14px;
+  font-weight: 600;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+}
+
+.btn-primary {
+  background: var(--color-primary);
+  color: white;
+  box-shadow: var(--shadow-sm);
+}
+.btn-primary:hover { background: var(--color-primary-dark); box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.btn-primary:disabled { opacity: 0.55; cursor: not-allowed; transform: none; box-shadow: none; }
+
+.btn-secondary {
+  background: var(--color-primary-light);
+  color: var(--color-primary-dark);
+}
+.btn-secondary:hover { opacity: 0.85; }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.status-pill.done { background: var(--color-success-light); color: var(--color-success); }
+.status-pill.processing { background: var(--color-warning-light); color: var(--color-warning); }
+.status-pill.error { background: var(--color-danger-light); color: var(--color-danger); }
+.status-pill.idle { background: var(--color-primary-light); color: var(--color-primary-dark); }
+
+/* --- Stage stepper --- */
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 32px;
+}
+.stepper-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+.stepper-dot {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  border: 2px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+.stepper-step.done .stepper-dot { background: var(--color-primary); border-color: var(--color-primary); color: white; }
+.stepper-step.active .stepper-dot { border-color: var(--color-primary); color: var(--color-primary); }
+.stepper-step.done, .stepper-step.active { color: var(--color-text); }
+.stepper-line {
+  width: 40px;
+  height: 2px;
+  background: var(--color-border);
+  margin: 0 6px;
+}
+.stepper-line.done { background: var(--color-primary); }
+
+/* --- Connected-node motif (used in logo & empty states) --- */
+.node-dot { fill: var(--color-primary); }
+.node-line { stroke: var(--color-primary); stroke-width: 1.5; opacity: 0.5; }
