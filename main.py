@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 # Load all SQLAlchemy models before loading API routes.
 # This ensures all foreign-key target tables are registered
@@ -23,6 +24,16 @@ from app.api.message_routes import router as message_router
 
 
 app = FastAPI()
+from fastapi.middleware.cors import CORSMiddleware 
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(router)
 app.include_router(user_router)
