@@ -5,7 +5,6 @@ const links = [
   { to: "/", label: "Home", end: true },
   { to: "/workspace", label: "Workspace" },
   { to: "/documents", label: "Documents" },
-  { to: "/login", label: "Account" },
 ];
 
 export default function Sidebar() {

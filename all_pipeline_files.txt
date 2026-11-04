@@ -1,0 +1,1024 @@
+﻿===== app/indexer/page_index.py =====
+import json
+import re 
+from pathlib import Path
+from turtle import heading
+
+from pydantic import BaseModel, Field
+
+from app.models.page import Page
+from app.config.settings import USE_GEMINI
+from app.llm.gemini_client import generate_page_index_structure
+from app.llm.ollama_client import generate_text as generate_ollama_text
+
+
+# ============================================================
+# PAGE INDEX MODEL
+# ============================================================
+
+class PageIndexNode(BaseModel):
+    node_id: str
+    title: str
+    start_index: int
+    end_index: int
+    summary: str = ""
+    nodes: list["PageIndexNode"] = Field(default_factory=list)
+
+
+# ============================================================
+# BASIC PAGE INDEX
+# ============================================================
+
+def create_basic_page_index(
+    pages: list[Page],
+    document_title: str
+) -> PageIndexNode:
+
+    root = PageIndexNode(
+        node_id="0001",
+        title=document_title,
+        start_index=1,
+        end_index=len(pages),
+        summary=f"Document containing {len(pages)} pages."
+    )
+
+    for page in pages:
+        page_node = PageIndexNode(
+            node_id=f"page-{page.page_number:04d}",
+            title=f"Page {page.page_number}",
+            start_index=page.page_number,
+            end_index=page.page_number,
+            summary=page.text[:200].replace("\n", " ")
+        )
+
+        root.nodes.append(page_node)
+
+    return root
+
+
+# ============================================================
+# SAVE PAGE INDEX
+# ============================================================
+
+def save_page_index(
+    page_index: PageIndexNode,
+    output_path: str
+) -> None:
+
+    output_file = Path(output_path)
+
+    output_file.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    with open(
+        output_file,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            page_index.model_dump(),
+            file,
+            indent=2,
+            ensure_ascii=False
+        )
+
+
+# ============================================================
+# GEMINI PROMPT
+# ============================================================
+
+def _build_document_prompt(
+    pages: list[Page]
+) -> str:
+
+    page_contents = []
+
+    for page in pages:
+
+        page_contents.append(
+            f"""
+PAGE {page.page_number}
+--------------------
+{page.text}
+"""
+        )
+
+    document_text = "\n".join(page_contents)
+
+    return f"""
+You are a document structure analyzer.
+
+Analyze the following document and identify its hierarchical structure.
+
+IMPORTANT:
+- Use ONLY information present in the document.
+- Do not invent section names.
+- Identify actual sections and subsections.
+- Each section must have a start page and end page.
+- Page numbers are the PDF page numbers shown below.
+- Page numbers are 1-based.
+- Keep the hierarchy meaningful.
+- Do not create a node for every paragraph.
+- Return ONLY valid JSON.
+- Do not include markdown or explanations outside the JSON.
+
+Return exactly this structure:
+
+{{
+  "title": "Document title",
+  "sections": [
+    {{
+      "title": "Section title",
+      "start_index": 1,
+      "end_index": 3,
+      "summary": "Short summary of this section.",
+      "sections": [
+        {{
+          "title": "Subsection title",
+          "start_index": 1,
+          "end_index": 2,
+          "summary": "Short summary of this subsection.",
+          "sections": []
+        }}
+      ]
+    }}
+  ]
+}}
+
+DOCUMENT:
+
+{document_text}
+"""
+
+
+# ============================================================
+# GEMINI RESPONSE â†’ PAGE INDEX
+# ============================================================
+
+def _build_page_index_from_response(
+    response: str,
+    pages: list[Page]
+) -> PageIndexNode:
+
+    response = response.strip()
+
+    if response.startswith("```"):
+        response = response.replace("```json", "", 1)
+        response = response.replace("```", "", 1)
+        response = response.strip()
+
+    data = json.loads(response)
+
+    if "sections" not in data:
+        raise ValueError(
+            "PageIndex response is missing the 'sections' field."
+        )
+
+    root = PageIndexNode(
+        node_id="0001",
+        title=(
+            data.get("title")
+            or data.get("document_title")
+            or "Document"
+        ),
+        start_index=1,
+        end_index=len(pages),
+        summary="Root node representing the complete document."
+    )
+
+    def build_nodes(
+        sections: list,
+        parent_id: str
+    ) -> list[PageIndexNode]:
+
+        nodes = []
+
+        for index, section in enumerate(
+            sections,
+            start=1
+        ):
+
+            node_id = f"{parent_id}.{index}"
+
+            node = PageIndexNode(
+                node_id=node_id,
+                title=section["title"],
+                start_index=section["start_index"],
+                end_index=section["end_index"],
+                summary=section.get("summary", "")
+            )
+
+            node.nodes = build_nodes(
+                section.get("sections", []),
+                node_id
+            )
+
+            nodes.append(node)
+
+        return nodes
+
+    root.nodes = build_nodes(
+        data.get("sections", []),
+        "0001"
+    )
+
+    return root
+
+
+# ============================================================
+# OLLAMA HEADING EXTRACTION
+# ============================================================
+
+OLLAMA_CHUNK_SIZE = 1
+
+
+def _build_ollama_prompt(
+    pages: list[Page]
+) -> str:
+
+    page_contents = []
+
+    for page in pages:
+        page_contents.append(
+            f"""
+=== PDF PAGE {page.page_number} ===
+
+{page.text}
+"""
+        )
+
+    document_text = "\n".join(page_contents)
+
+    return f"""
+Read the PDF page below.
+
+Your ONLY task is to identify actual section headings and
+subsection headings that visibly appear on this page.
+
+Return ONLY a JSON array.
+
+Each item MUST contain exactly these fields:
+
+- title
+- level
+
+Rules:
+
+1. Use ONLY headings that actually appear in the document.
+2. Do NOT invent headings.
+3. level 1 = main section.
+4. level 2 = subsection.
+5. level 3 = sub-subsection.
+6. Do NOT return summaries.
+7. Do NOT return descriptions.
+8. Do NOT return analysis.
+9. Do NOT return explanations.
+10. Do NOT return page numbers.
+11. Do NOT return character positions.
+12. Do NOT return character offsets.
+13. Do NOT include "PAGE X" in titles.
+14. Do NOT create a heading for every paragraph.
+15. Return an empty array if no actual section headings are present.
+16. Preserve the heading wording from the document.
+17. Do not infer headings from surrounding context.
+18. Only return headings that are explicitly visible on this page.
+19. If there are multiple headings, return all of them.
+20. If there is only one heading, return one item inside the JSON array.
+21. The response MUST be valid JSON.
+22. Do not write anything before or after the JSON array.
+
+Example output:
+
+[
+  {{
+    "title": "1. Introduction",
+    "level": 1
+  }},
+  {{
+    "title": "2.1 Previous Research",
+    "level": 2
+  }}
+]
+
+DOCUMENT:
+
+{document_text}
+"""
+
+
+def _extract_ollama_headings(
+    pages: list[Page]
+) -> list[dict]:
+
+    prompt = _build_ollama_prompt(pages)
+
+    print(
+        f"\n[PageIndex] Sending pages "
+        f"{pages[0].page_number}-{pages[-1].page_number} "
+        f"to Ollama/Qwen..."
+    )
+
+    print(
+        f"[PageIndex] Prompt characters: {len(prompt)}"
+    )
+
+    response = generate_ollama_text(
+        prompt,
+        json_mode=True
+    )
+
+    response = response.strip()
+
+    print(
+        "\n========== QWEN HEADING RESPONSE =========="
+    )
+    print(response)
+    print(
+        "========== END QWEN RESPONSE ==========\n"
+    )
+
+    if response.startswith("```"):
+        response = response.replace(
+            "```json",
+            "",
+            1
+        )
+        response = response.replace(
+            "```",
+            "",
+            1
+        )
+        response = response.strip()
+
+    try:
+        data = json.loads(response)
+
+    except json.JSONDecodeError as e:
+
+        print(
+            "========== QWEN JSON ERROR =========="
+        )
+        print(e)
+        print(
+            "======================================"
+        )
+
+        raise
+
+    # Qwen sometimes returns a single heading as an object
+    # instead of wrapping it inside an array.
+    if isinstance(data, dict):
+        if "title" in data:
+            data = [data]
+        else:
+            raise ValueError(
+                "Qwen returned a JSON object without a heading."
+        )
+
+    if not isinstance(data, list):
+        raise ValueError(
+            "Qwen heading response must be a JSON array or heading object."
+    )
+    headings = []
+
+    for item in data:
+
+        if not isinstance(item, dict):
+            continue
+
+        title = item.get("title")
+        level = item.get("level")
+
+        if not title:
+            continue
+
+        try:
+            level = int(level)
+        except (TypeError, ValueError):
+            level = 1
+
+        if level < 1:
+            level = 1
+
+        if level > 3:
+            level = 3
+
+        headings.append(
+            {
+                "title": str(title).strip(),
+                "level": level
+            }
+        )
+
+    return headings
+
+
+# ============================================================
+# BUILD OLLAMA PAGE INDEX
+# ============================================================
+
+def _infer_heading_level(title: str, llm_level: int) -> int:
+    """
+    Infer heading hierarchy from explicit numbering when available.
+
+    Examples:
+        "1. Introduction" -> level 1
+        "2. Literature review" -> level 1
+        "2.1. Autonomy..." -> level 2
+        "4.5. Language practiced" -> level 2
+        "4.5.1. Example" -> level 3
+
+    If no structural numbering is present, fall back to
+    the level suggested by the LLM.
+    """
+
+    title = title.strip()
+
+    match = re.match(
+        r"^\s*(\d+(?:\.\d+){0,2})\.?\s+",
+        title
+    )
+
+    if match:
+        numbering = match.group(1)
+
+        depth = len(numbering.split("."))
+
+        return min(depth, 3)
+
+    return max(1, min(int(llm_level), 3))
+
+def create_ollama_page_index(
+    pages: list[Page]
+) -> PageIndexNode:
+
+    """
+    Build PageIndex using local Ollama/Qwen.
+
+    Qwen is responsible ONLY for identifying headings.
+
+    Python is responsible for:
+    - assigning PDF page numbers
+    - determining section ranges
+    - building the hierarchy
+    - creating PageIndexNode objects
+    """
+
+    print(
+        "\n[PageIndex] Using Ollama/Qwen pipeline..."
+    )
+
+    all_headings = []
+
+    # --------------------------------------------------------
+    # Process the PDF in 2-page chunks.
+    # --------------------------------------------------------
+
+    for start in range(
+        0,
+        len(pages),
+        OLLAMA_CHUNK_SIZE
+    ):
+
+        chunk = pages[
+            start:start + OLLAMA_CHUNK_SIZE
+        ]
+
+        headings = _extract_ollama_headings(
+            chunk
+        )
+
+        print(
+            f"[PageIndex] Found {len(headings)} headings "
+            f"in pages "
+            f"{chunk[0].page_number}-"
+            f"{chunk[-1].page_number}"
+        )
+
+        for heading in headings:
+
+            all_headings.append(
+                {
+                    "title": heading["title"],
+                    "level": heading["level"],
+                    "page": chunk[0].page_number
+                }
+            )
+
+    # --------------------------------------------------------
+    # Remove duplicate headings while preserving order.
+    # --------------------------------------------------------
+
+    unique_headings = []
+
+    seen = set()
+
+    for heading in all_headings:
+
+        key = (
+            heading["title"].lower(),
+            heading["level"],
+            heading["page"]
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique_headings.append(heading)
+
+    # --------------------------------------------------------
+    # If Qwen found nothing, fail clearly.
+    # --------------------------------------------------------
+
+    if not unique_headings:
+
+        raise ValueError(
+            "Qwen did not identify any usable section headings."
+        )
+
+    # --------------------------------------------------------
+    # Build root.
+    # --------------------------------------------------------
+
+    root = PageIndexNode(
+        node_id="0001",
+        title="Document",
+        start_index=1,
+        end_index=len(pages),
+        summary="Root node representing the complete document."
+    )
+
+    # --------------------------------------------------------
+    # Build hierarchy.
+    # --------------------------------------------------------
+
+    stack = []
+
+    counter = 0
+
+    for index, heading in enumerate(
+        unique_headings
+    ):
+
+        title = heading["title"]
+
+        level = _infer_heading_level(
+            title,
+            heading["level"]
+        )
+
+        start_page = heading["page"]
+
+        # ----------------------------------------------------
+        # Determine end page.
+        #
+        # A section ends immediately before the next heading
+        # at the same or higher level.
+        # ----------------------------------------------------
+
+        end_page = len(pages)
+
+        for next_heading in unique_headings[index + 1:]:
+
+            next_level = _infer_heading_level(
+                next_heading["title"],
+                next_heading["level"]
+            )
+
+            if next_level <= level:
+
+                end_page = max(
+                    start_page,
+                    next_heading["page"] - 1
+                )
+
+                break
+
+        counter += 1
+
+        node = PageIndexNode(
+            node_id=f"0001.{counter}",
+            title=title,
+            start_index=start_page,
+            end_index=end_page,
+            summary=""
+        )
+
+        # ----------------------------------------------------
+        # Find the parent.
+        # ----------------------------------------------------
+
+        while stack and stack[-1]["level"] >= level:
+            stack.pop()
+
+        if not stack:
+
+            root.nodes.append(node)
+
+        else:
+
+            parent = stack[-1]["node"]
+
+            parent.nodes.append(node)
+
+        stack.append(
+            {
+                "level": level,
+                "node": node
+            }
+        )
+
+    print(
+        f"\n[PageIndex] Total headings found: "
+        f"{len(unique_headings)}"
+    )
+
+    print(
+        f"[PageIndex] Top-level sections: "
+        f"{len(root.nodes)}"
+    )
+
+    return root
+
+
+# ============================================================
+# CONFIGURED PAGEINDEX PIPELINE
+# ============================================================
+
+def create_llm_page_index(
+    pages: list[Page]
+) -> PageIndexNode:
+
+    """
+    Create PageIndex using the configured pipeline.
+
+    USE_GEMINI = True
+        -> Gemini
+
+    USE_GEMINI = False
+        -> Ollama / local Qwen
+    """
+
+    if USE_GEMINI:
+
+        print(
+            "\n[PageIndex] Using Gemini pipeline..."
+        )
+
+        prompt = _build_document_prompt(
+            pages
+        )
+
+        response = generate_page_index_structure(
+            prompt
+        )
+
+        return _build_page_index_from_response(
+            response,
+            pages
+        )
+
+    else:
+
+        print(
+            "\n[PageIndex] Using Ollama/Qwen pipeline..."
+        )
+
+        return create_ollama_page_index(
+            pages
+        )
+
+===== app/llm/ollama_client.py =====
+import json
+import urllib.request
+
+
+OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_MODEL = "pdurlej/qwythos-9b-claude-mythos-5-1m:latest"
+
+
+def generate_text(
+    prompt: str,
+    json_mode: bool = False,
+    json_schema=None
+) -> str:
+
+    """Generate text using the local Ollama model."""
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "stream": False,
+        "think": False
+    }
+
+    if json_schema is not None:
+        payload["format"] = json_schema
+
+    elif json_mode:
+        payload["format"] = "json"
+
+    data = json.dumps(
+        payload
+    ).encode("utf-8")
+
+    request = urllib.request.Request(
+        OLLAMA_URL,
+        data=data,
+        headers={
+            "Content-Type": "application/json"
+        },
+        method="POST"
+    )
+
+    with urllib.request.urlopen(
+        request,
+        timeout=120
+    ) as response:
+
+        result = json.loads(
+            response.read().decode("utf-8")
+        )
+
+    return result["message"]["content"]
+
+===== app/parser/pdf_parser.py =====
+import os
+
+import fitz
+
+from app.models.page import Page
+
+
+def parse_pdf(file_path: str) -> list[Page]:
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"PDF file not found: {file_path}")
+
+    if not file_path.lower().endswith(".pdf"):
+        raise ValueError("The provided file is not a PDF.")
+
+    try:
+        document = fitz.open(file_path)
+    except Exception as e:
+        raise ValueError(f"Unable to open PDF: {e}")
+
+    pages = []
+
+    for page_number, pdf_page in enumerate(document, start=1):
+        text = pdf_page.get_text().strip()
+
+        if not text:
+            print(f"Warning: Page {page_number} contains no extractable text.")
+
+        page = Page(
+    page_number=page_number,
+    text=text,
+    word_count=len(text.split()),
+    char_count=len(text)
+)
+
+        pages.append(page)
+
+    document.close()
+
+    return pages
+
+===== app/parser/document_parser.py =====
+from pathlib import Path
+
+import anydoc
+
+
+def parse_document(file_path: str) -> str:
+    """
+    Convert a supported document into GitHub-Flavored Markdown
+    using the locally built anydoc integration.
+    """
+    path = Path(file_path)
+
+    if not path.exists():
+        raise FileNotFoundError(f"Document not found: {file_path}")
+
+    with open(path, "rb") as file:
+        data = file.read()
+
+    # CSV does not have enough information in its bytes
+    # for reliable format detection, so provide the format explicitly.
+    if path.suffix.lower() == ".csv":
+        return anydoc.to_markdown_bytes(data, "csv")
+
+    return anydoc.to_markdown_bytes(data)
+
+===== app/parser/markdown_chunker.py =====
+from app.models.page import Page
+
+# Roughly how many characters go into one artificial "page".
+# Kept modest so each page stays well within LLM prompt limits
+# and the resulting PageIndex has a sensible number of pages.
+DEFAULT_CHUNK_SIZE = 3000
+
+
+def chunk_markdown_to_pages(markdown: str, chunk_size: int = DEFAULT_CHUNK_SIZE) -> list[Page]:
+    """
+    Split converted Markdown (from anydoc, for non-PDF documents) into
+    artificial "pages" so it can be fed into the same PageIndex / RAG
+    pipeline that expects a list[Page] (normally produced by parse_pdf).
+
+    We split on paragraph boundaries (blank lines) so we don't cut a
+    sentence in half, and accumulate paragraphs until we hit roughly
+    chunk_size characters, then start a new page.
+    """
+    paragraphs = [p for p in markdown.split("\n\n") if p.strip()]
+
+    if not paragraphs:
+        return []
+
+    pages: list[Page] = []
+    current_paragraphs: list[str] = []
+    current_length = 0
+    page_number = 1
+
+    for paragraph in paragraphs:
+        paragraph_length = len(paragraph)
+
+        if current_paragraphs and current_length + paragraph_length > chunk_size:
+            page_text = "\n\n".join(current_paragraphs).strip()
+            pages.append(
+                Page(
+                    page_number=page_number,
+                    text=page_text,
+                    word_count=len(page_text.split()),
+                    char_count=len(page_text),
+                )
+            )
+            page_number += 1
+            current_paragraphs = []
+            current_length = 0
+
+        current_paragraphs.append(paragraph)
+        current_length += paragraph_length
+
+    if current_paragraphs:
+        page_text = "\n\n".join(current_paragraphs).strip()
+        pages.append(
+            Page(
+                page_number=page_number,
+                text=page_text,
+                word_count=len(page_text.split()),
+                char_count=len(page_text),
+            )
+        )
+
+    return pages
+
+===== app/parser/structured_parser.py =====
+import re
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Section:
+    title: str
+    level: int
+    content: str = ""
+    start_page: int | None = None
+    end_page: int | None = None
+    children: list["Section"] = field(default_factory=list)
+
+@dataclass
+class StructuredDocument:
+    title: str
+    sections: list[Section] = field(default_factory=list)
+
+
+def parse_markdown(markdown: str) -> StructuredDocument:
+    """
+    Convert Markdown into a hierarchical document structure.
+
+    Only meaningful document headings are treated as sections.
+    """
+
+    lines = markdown.splitlines()
+
+    document_title = "Untitled Document"
+    root_sections = []
+    stack = []
+
+    for line in lines:
+        line = line.strip()
+
+        heading_match = re.match(r"^(#{1,6})\s+(.*)$", line)
+
+        if heading_match:
+            level = len(heading_match.group(1))
+            title = heading_match.group(2).strip()
+
+            # First # heading becomes the document title.
+            if level == 1 and document_title == "Untitled Document":
+                document_title = title
+                continue
+
+            # Ignore empty/separator headings such as:
+            # ### --------------------
+            if not title or re.fullmatch(r"[-_=]+", title):
+                continue
+
+            # Ignore metadata headings before the actual sections.
+            # For this document, numbered sections and Abstract
+            # represent meaningful structure.
+            is_numbered_section = bool(
+                re.match(r"^\d+(\.\d+)*\.?\s+", title)
+            )
+
+            is_abstract = title.lower() == "abstract"
+
+            if not is_numbered_section and not is_abstract:
+                continue
+
+            section = Section(
+                title=title,
+                level=level
+            )
+
+            while stack and stack[-1].level >= level:
+                stack.pop()
+
+            if stack:
+                stack[-1].children.append(section)
+            else:
+                root_sections.append(section)
+
+            stack.append(section)
+
+        else:
+            # Normal text belongs to the current section.
+            if stack and line:
+                if stack[-1].content:
+                    stack[-1].content += "\n"
+
+                stack[-1].content += line
+
+    return StructuredDocument(
+        title=document_title,
+        sections=root_sections
+    )
+
+def map_sections_to_pages(
+    document: StructuredDocument,
+    pages: list
+) -> StructuredDocument:
+    """
+    Map each top-level section to the PDF pages where it appears.
+    """
+
+    for section in document.sections:
+
+        matching_pages = [
+            page.page_number
+            for page in pages
+            if section.title.lower() in page.text.lower()
+        ]
+
+        if matching_pages:
+            section.start_page = min(matching_pages)
+
+    # Determine end pages using the next section's start page.
+    for index, section in enumerate(document.sections):
+
+        if section.start_page is None:
+            continue
+
+        if index + 1 < len(document.sections):
+            next_section = document.sections[index + 1]
+
+        if next_section.start_page is not None:
+           section.end_page = max(
+                section.start_page,
+                next_section.start_page - 1
+       )
+        else:
+            section.end_page = section.start_page
+    else:
+        section.end_page = pages[-1].page_number
+
+    return document
+
+===== app/models/page.py =====
+from pydantic import BaseModel
+
+
+class Page(BaseModel):
+    page_number: int
+    text: str
+    word_count: int
+    char_count: int
+

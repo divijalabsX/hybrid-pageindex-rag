@@ -149,10 +149,10 @@ class Document(Base):
         nullable=True,
     )
 
-    created_by: Mapped[uuid.UUID | None] = mapped_column(
+    created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id"),
-        nullable=True,
+        nullable=False,
     )
 
     updated_by: Mapped[uuid.UUID | None] = mapped_column(

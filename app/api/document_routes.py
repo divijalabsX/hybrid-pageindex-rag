@@ -1,12 +1,26 @@
+import os
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    UploadFile,
+)
 from sqlalchemy.orm import Session
 
 from app.database.database import get_db
 from app.models.document import Document
-from app.schemas.document import DocumentCreate, DocumentResponse
+from app.schemas.document import (
+    DocumentCreate,
+    DocumentResponse,
+    DocumentUploadResponse,
+    DocumentUpdate,
+)
+from app.services.document_storage import save_uploaded_file
+from app.services.dev_identity import get_development_user
 
 
 router = APIRouter(
@@ -15,68 +29,142 @@ router = APIRouter(
 )
 
 
-@router.post("/", response_model=DocumentResponse)
-def create_document(
-    document_data: DocumentCreate,
+# --------------------------------------------------
+# 1. Upload document to the database-backed library
+# --------------------------------------------------
+
+@router.post(
+    "/upload",
+    response_model=DocumentUploadResponse,
+    status_code=201,
+)
+async def upload_document_to_library(
+    file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
+    user = get_development_user(db)
+
+    stored = await save_uploaded_file(file)
+
     document = Document(
-        owner_id=document_data.owner_id,
-        title=document_data.title,
-        original_filename=document_data.original_filename,
-        mime_type=document_data.mime_type,
-        file_extension=document_data.file_extension,
-        file_size_bytes=document_data.file_size_bytes,
-        storage_path=document_data.storage_path,
-        file_checksum=document_data.file_checksum,
-
-        raw_text=document_data.raw_text,
-        parsed_json=document_data.parsed_json,
-        okf_markdown=document_data.okf_markdown,
-        okf_metadata=document_data.okf_metadata,
-
-        status=document_data.status,
-        parse_status=document_data.parse_status,
-        index_status=document_data.index_status,
-        okf_status=document_data.okf_status,
-
-        error_message=document_data.error_message,
-        version=document_data.version,
-        is_active=document_data.is_active,
-
-        llm_config_id=document_data.llm_config_id,
-        created_by=document_data.created_by,
-        updated_by=document_data.updated_by,
+        id=stored["id"],
+        owner_id=user.id,
+        title=os.path.splitext(
+            stored["original_filename"]
+        )[0][:500],
+        original_filename=stored["original_filename"],
+        mime_type=file.content_type or "application/octet-stream",
+        file_extension=stored["extension"],
+        file_size_bytes=stored["file_size_bytes"],
+        storage_path=stored["storage_path"],
+        file_checksum=stored["file_checksum"],
+        status="UPLOADED",
+        parse_status="PENDING",
+        index_status="PENDING",
+        okf_status="PENDING",
+        version=1,
+        is_active=True,
+        created_by=user.id,
     )
 
-    db.add(document)
-    db.commit()
-    db.refresh(document)
+    try:
+        db.add(document)
+        db.commit()
+        db.refresh(document)
+
+    except Exception:
+        db.rollback()
+
+        # Best-effort cleanup if database persistence fails.
+        try:
+            os.remove(stored["storage_path"])
+        except OSError:
+            pass
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save document metadata",
+        )
 
     return document
 
 
-@router.get("/", response_model=list[DocumentResponse])
+# --------------------------------------------------
+# 2. List documents belonging to the current user
+# --------------------------------------------------
+
+@router.get(
+    "/",
+    response_model=list[DocumentUploadResponse],
+)
 def list_documents(
     db: Session = Depends(get_db),
 ):
+    user = get_development_user(db)
+
     return (
         db.query(Document)
-        .filter(Document.deleted_at.is_(None))
+        .filter(
+            Document.owner_id == user.id,
+            Document.deleted_at.is_(None),
+        )
         .order_by(Document.created_at.desc())
         .all()
     )
 
 
-@router.get("/{document_id}", response_model=DocumentResponse)
+# --------------------------------------------------
+# 3. Get document processing status
+# --------------------------------------------------
+
+@router.get(
+    "/{document_id}/status",
+    response_model=DocumentUploadResponse,
+)
+def get_document_status(
+    document_id: UUID,
+    db: Session = Depends(get_db),
+):
+    user = get_development_user(db)
+
+    document = (
+        db.query(Document)
+        .filter(
+            Document.id == document_id,
+            Document.owner_id == user.id,
+            Document.deleted_at.is_(None),
+        )
+        .first()
+    )
+
+    if not document:
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found",
+        )
+
+    return document
+
+
+# --------------------------------------------------
+# 4. Get one document
+# --------------------------------------------------
+
+@router.get(
+    "/{document_id}",
+    response_model=DocumentUploadResponse,
+)
 def get_document(
     document_id: UUID,
     db: Session = Depends(get_db),
 ):
+    user = get_development_user(db)
+
     document = (
         db.query(Document)
         .filter(
             Document.id == document_id,
+            Document.owner_id == user.id,
             Document.deleted_at.is_(None),
         )
         .first()
@@ -91,16 +179,26 @@ def get_document(
     return document
 
 
-@router.put("/{document_id}", response_model=DocumentResponse)
+# --------------------------------------------------
+# 5. Update permitted document metadata
+# --------------------------------------------------
+
+@router.patch(
+    "/{document_id}",
+    response_model=DocumentUploadResponse,
+)
 def update_document(
     document_id: UUID,
-    document_data: DocumentCreate,
+    document_data: DocumentUpdate,
     db: Session = Depends(get_db),
 ):
+    user = get_development_user(db)
+
     document = (
         db.query(Document)
         .filter(
             Document.id == document_id,
+            Document.owner_id == user.id,
             Document.deleted_at.is_(None),
         )
         .first()
@@ -112,50 +210,48 @@ def update_document(
             detail="Document not found",
         )
 
-    document.owner_id = document_data.owner_id
-    document.title = document_data.title
-    document.original_filename = document_data.original_filename
-    document.mime_type = document_data.mime_type
-    document.file_extension = document_data.file_extension
-    document.file_size_bytes = document_data.file_size_bytes
-    document.storage_path = document_data.storage_path
-    document.file_checksum = document_data.file_checksum
+    title = document_data.title.strip()
 
-    document.raw_text = document_data.raw_text
-    document.parsed_json = document_data.parsed_json
-    document.okf_markdown = document_data.okf_markdown
-    document.okf_metadata = document_data.okf_metadata
+    if not title:
+        raise HTTPException(
+            status_code=422,
+            detail="Title cannot be empty",
+        )
 
-    document.status = document_data.status
-    document.parse_status = document_data.parse_status
-    document.index_status = document_data.index_status
-    document.okf_status = document_data.okf_status
-
-    document.error_message = document_data.error_message
-    document.version = document_data.version
-    document.is_active = document_data.is_active
-
-    document.llm_config_id = document_data.llm_config_id
-    document.created_by = document_data.created_by
-    document.updated_by = document_data.updated_by
-
+    document.title = title
     document.updated_at = datetime.now(timezone.utc)
+    document.updated_by = user.id
 
-    db.commit()
-    db.refresh(document)
+    try:
+        db.commit()
+        db.refresh(document)
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not update document",
+        )
 
     return document
 
+
+# --------------------------------------------------
+# 6. Soft-delete a document
+# --------------------------------------------------
 
 @router.delete("/{document_id}")
 def delete_document(
     document_id: UUID,
     db: Session = Depends(get_db),
 ):
+    user = get_development_user(db)
+
     document = (
         db.query(Document)
         .filter(
             Document.id == document_id,
+            Document.owner_id == user.id,
             Document.deleted_at.is_(None),
         )
         .first()
@@ -167,12 +263,23 @@ def delete_document(
             detail="Document not found",
         )
 
-    document.deleted_at = datetime.now(timezone.utc)
-    document.updated_at = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
 
-    db.commit()
+    document.deleted_at = now
+    document.updated_at = now
+    document.updated_by = user.id
+
+    try:
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not delete document",
+        )
 
     return {
         "message": "Document deleted successfully",
-        "document_id": document_id,
+        "document_id": str(document_id),
     }

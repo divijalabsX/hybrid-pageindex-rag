@@ -1,7 +1,7 @@
 from uuid import UUID
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DocumentCreate(BaseModel):
@@ -67,3 +67,22 @@ class DocumentResponse(BaseModel):
     deleted_at: datetime | None
 
     model_config = ConfigDict(from_attributes=True)
+
+    
+class DocumentUploadResponse(BaseModel):
+    id: UUID
+    title: str
+    original_filename: str
+    mime_type: str
+    file_extension: str | None
+    file_size_bytes: int
+    status: str
+    parse_status: str
+    index_status: str
+    okf_status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class DocumentUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
